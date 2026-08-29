@@ -1,4 +1,4 @@
-name: Build marble GKI 5.10.236 - DroidSpaces + SukiSU Ultra (KPM)
+name: Build marble GKI 5.10.264 - DroidSpaces + SukiSU Ultra (KPM)
 
 on:
   workflow_dispatch:
@@ -249,17 +249,15 @@ jobs:
 
           # Build AnyKernel3 zip
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
+          # Only copy raw Image (boot.img is HEADER_VER 4 raw, not lz4) - avoid dual Image confusion where AK3 picks Image first anyway
           cp -v "$DIST/Image" /tmp/AnyKernel3/Image 2>/dev/null || cp -v "$DIST/Image.lz4" /tmp/AnyKernel3/Image.lz4 2>/dev/null || true
-          # Keep original Image if both exist, prefer uncompressed Image
-          if [ -f /tmp/artifacts/Image ]; then cp -v /tmp/artifacts/Image /tmp/AnyKernel3/; fi
-          if [ -f /tmp/artifacts/Image.lz4 ]; then cp -v /tmp/artifacts/Image.lz4 /tmp/AnyKernel3/; fi
 
           # Setup anykernel.sh for marble GKI (use Image)
           cat > /tmp/AnyKernel3/anykernel.sh <<'AKSH'
           # AnyKernel3 Ramdisk Mod Script
           # osm0sis @ xda-developers
           properties() { '
-          kernel.string=marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM by lakitu12
+          kernel.string=marble GKI 5.10.264 DroidSpaces + SukiSU Ultra KPM by lakitu12
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -297,7 +295,7 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### Build complete - marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
+          echo "### Build complete - marble GKI 5.10.264 DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Base: common-android13-5.10 (5.10.236)" >> $GITHUB_STEP_SUMMARY
           echo "- DroidSpaces: SYSVIPC + POSIX_MQUEUE kABI patches + gki_defconfig fragment" >> $GITHUB_STEP_SUMMARY
