@@ -73,7 +73,7 @@ jobs:
       - name: Patch gki_defconfig for DroidSpaces
         run: |
           set -e
-          DEFCONFIG=$(find ~/gki -name "gki_defconfig" | head -n1)
+          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
           echo "DEFCONFIG=$DEFCONFIG"
           cat "$DEFCONFIG" | head -n 50
 
@@ -119,6 +119,17 @@ jobs:
           ensure_y KALLSYMS
           ensure_y KALLSYMS_ALL
 
+          # Fix LTO OOM (exit 143) on 7GB runner: disable LTO for CI
+          # GKI 5.10 default is LTO_CLANG_FULL which needs >16GB for vmlinux.o
+          echo "=== Disable LTO for CI ==="
+          # Remove existing LTO configs and force NONE
+          sed -i '/CONFIG_LTO/d' "$DEFCONFIG"
+          sed -i '/CONFIG_CFI_CLANG/d' "$DEFCONFIG"
+          echo "CONFIG_LTO_NONE=y" >> "$DEFCONFIG"
+          echo "# CONFIG_LTO_CLANG is not set" >> "$DEFCONFIG"
+          echo "# CONFIG_CFI_CLANG is not set" >> "$DEFCONFIG"
+          grep -E "CONFIG_LTO|CONFIG_CFI" "$DEFCONFIG" || true
+
           echo "=== gki_defconfig diff ==="
           grep -E "CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|KPROBES|KPM|KSU)" "$DEFCONFIG" || true
           # Show full file tail
@@ -145,7 +156,7 @@ jobs:
           cat common/drivers/Kconfig 2>/dev/null | grep -A2 kernelsu || cat drivers/Kconfig | grep -A2 kernelsu || true
 
           # Enable KPM in defconfig (SukiSU KPM requires CONFIG_KPM=y + KALLSYMS)
-          DEFCONFIG=$(find ~/gki -name "gki_defconfig" | head -n1)
+          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
           echo "Enabling CONFIG_KPM and KSU in $DEFCONFIG"
           echo "--- before ---"
           grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" || echo "not found before"
