@@ -1,4 +1,4 @@
-name: Build marble GKI 5.10.264 - DroidSpaces + SukiSU Ultra (KPM)
+name: Build marble GKI 5.10.236 - DroidSpaces + SukiSU Ultra (KPM)
 
 on:
   workflow_dispatch:
@@ -31,12 +31,12 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Sync GKI source (android13-5.10 - 5.10.236)
+      - name: Sync GKI source (android12-5.10 - 5.10.236)
         run: |
           mkdir -p ~/gki
           cd ~/gki
           # --depth=1 to save time/disk, a/b GKI doesn't need full history
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.10 --depth=1
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10 --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --optimized-fetch --prune
           echo "=== sync done ==="
           du -sh ~/gki
@@ -211,12 +211,12 @@ jobs:
           grep -n "KMI" common/build.config.gki.aarch64 | head || true
           # Show toolchain info
           ls -la prebuilts/ 2>/dev/null | head -n 20 || true
-          # Build - android13-5.10 uses build/build.sh with limited jobs (use pipefail so KMI error fails build)
+          # Build - android12-5.10 uses build/build.sh with limited jobs (use pipefail so KMI error fails build)
           set -o pipefail
           KMI_SYMBOL_LIST_STRICT_MODE=0 BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tee build.log || true
           echo "build.sh exit: ${PIPESTATUS[0]}"
           echo "=== Build finished ==="
-          ls -lh out/android13-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/ 2>/dev/null || find out -type f -name "Image*" | head -n 20
+          ls -lh out/android12-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/ 2>/dev/null || find out -type f -name "Image*" | head -n 20
           cat build.log | tail -n 100
 
       - name: Prepare artifacts (AnyKernel3)
@@ -257,7 +257,7 @@ jobs:
           # AnyKernel3 Ramdisk Mod Script
           # osm0sis @ xda-developers
           properties() { '
-          kernel.string=marble GKI 5.10.264 DroidSpaces + SukiSU Ultra KPM by lakitu12
+          kernel.string=marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM by lakitu12
           do.devicecheck=0
           do.modules=0
           do.systemless=1
@@ -295,9 +295,9 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### Build complete - marble GKI 5.10.264 DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
+          echo "### Build complete - marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Base: common-android13-5.10 (5.10.236)" >> $GITHUB_STEP_SUMMARY
+          echo "- Base: common-android12-5.10 (5.10.236)" >> $GITHUB_STEP_SUMMARY
           echo "- DroidSpaces: SYSVIPC + POSIX_MQUEUE kABI patches + gki_defconfig fragment" >> $GITHUB_STEP_SUMMARY
           echo "- Root: SukiSU Ultra latest + CONFIG_KPM=y" >> $GITHUB_STEP_SUMMARY
           echo "- Device: marble (SM7475) HyperOS 3.0 Android 15" >> $GITHUB_STEP_SUMMARY
