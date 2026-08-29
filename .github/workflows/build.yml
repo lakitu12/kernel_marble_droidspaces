@@ -59,7 +59,7 @@ jobs:
           cd "$KDIR"
           # 1) SYSVIPC kABI fix - must succeed, try 6_7_8 variant first
           echo "=== Apply 001 SYSVIPC kABI ==="
-          patch -p1 < /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kABI_6_7_8.patch
+          patch -p1 < /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
           echo "001 applied: $?"
 
           # 2) POSIX_MQUEUE kABI fix - only for 5.10 and below
