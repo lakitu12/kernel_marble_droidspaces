@@ -1,0 +1,248 @@
+name: Build marble GKI 5.10.236 - DroidSpaces + SukiSU Ultra (KPM)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/build.yml'
+      - 'README.md'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git make bc bison flex libssl-dev libelf-dev \
+            python3 python-is-python3 cpio pahole libncurses-dev rsync \
+            curl zip unzip tar xz-utils gcc g++ gawk openssl
+
+      - name: Install repo
+        run: |
+          mkdir -p ~/bin
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+x ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Sync GKI source (android13-5.10 - 5.10.236)
+        run: |
+          mkdir -p ~/gki
+          cd ~/gki
+          # --depth=1 to save time/disk, a/b GKI doesn't need full history
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android13-5.10 --depth=1
+          repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --optimized-fetch --prune
+          echo "=== sync done ==="
+          du -sh ~/gki
+          find . -name "gki_defconfig" | head -n 5
+          ls -R | head -n 100
+
+      - name: Apply DroidSpaces kABI patches (GKI 5.10)
+        run: |
+          set -e
+          cd ~/gki
+          # Clone DroidSpaces-OSS for patches
+          git clone --depth=1 https://github.com/ravindu644/Droidspaces-OSS /tmp/Droidspaces-OSS
+          ls /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/
+
+          # Find kernel common dir (manifest puts kernel in ./common)
+          if [ -d common ]; then KDIR=common; elif [ -d kernel/common ]; then KDIR=kernel/common; else KDIR=$(find . -name "Kconfig" -path "*/arch/arm64/*" | head -n1 | xargs dirname | xargs dirname | xargs dirname); fi
+          echo "KDIR=$KDIR"
+          ls "$KDIR" | head -n 20
+
+          cd "$KDIR"
+          # 1) SYSVIPC kABI fix - must succeed, try 6_7_8 variant first
+          echo "=== Apply 001 SYSVIPC kABI ==="
+          patch -p1 < /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kABI_6_7_8.patch
+          echo "001 applied: $?"
+
+          # 2) POSIX_MQUEUE kABI fix - only for 5.10 and below
+          echo "=== Apply 002 POSIX_MQUEUE kABI (5.10 only) ==="
+          patch -p1 < /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
+          echo "002 applied: $?"
+
+          # Show patched files
+          git diff --stat || true
+
+      - name: Patch gki_defconfig for DroidSpaces
+        run: |
+          set -e
+          DEFCONFIG=$(find ~/gki -name "gki_defconfig" | head -n1)
+          echo "DEFCONFIG=$DEFCONFIG"
+          cat "$DEFCONFIG" | head -n 50
+
+          # Helper: ensure CONFIG_FOO=y (replace is not set or append)
+          ensure_y() {
+            local cfg="$1"
+            local file="$DEFCONFIG"
+            if grep -q "# CONFIG_${cfg} is not set" "$file"; then
+              sed -i "s/# CONFIG_${cfg} is not set/CONFIG_${cfg}=y/" "$file"
+              echo " -> $cfg: replaced not set -> y"
+            elif grep -q "CONFIG_${cfg}=y" "$file"; then
+              echo " -> $cfg already y"
+            elif grep -q "CONFIG_${cfg}=" "$file"; then
+              sed -i "s/CONFIG_${cfg}=.*/CONFIG_${cfg}=y/" "$file"
+              echo " -> $cfg: flipped -> y"
+            else
+              echo "CONFIG_${cfg}=y" >> "$file"
+              echo " -> $cfg: appended y"
+            fi
+          }
+
+          # DroidSpaces GKI exclusive fragment (from Kernel-Configuration.md#GKI)
+          ensure_y SYSVIPC
+          ensure_y POSIX_MQUEUE
+          ensure_y IPC_NS
+          ensure_y PID_NS
+          ensure_y DEVTMPFS
+          ensure_y NETFILTER_XT_MATCH_ADDRTYPE
+          # Optional recommended
+          ensure_y USER_NS
+          ensure_y TMPFS_POSIX_ACL
+          ensure_y TMPFS_XATTR
+          ensure_y NETFILTER_XT_TARGET_REJECT
+          ensure_y NETFILTER_XT_TARGET_LOG
+          ensure_y NETFILTER_XT_MATCH_RECENT
+          ensure_y IP_SET
+          ensure_y IP_SET_HASH_IP
+          ensure_y IP_SET_HASH_NET
+          ensure_y NETFILTER_XT_SET
+
+          # KPROBES is required by KSU/SukiSU
+          ensure_y KPROBES
+          ensure_y KALLSYMS
+          ensure_y KALLSYMS_ALL
+
+          echo "=== gki_defconfig diff ==="
+          grep -E "CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|KPROBES|KPM|KSU)" "$DEFCONFIG" || true
+          # Show full file tail
+          echo "--- tail ---"
+          tail -n 30 "$DEFCONFIG"
+
+      - name: Setup SukiSU Ultra + KPM
+        run: |
+          set -e
+          cd ~/gki
+          # Detect GKI root (where drivers/ lives)
+          if [ -d common ]; then GKI_ROOT=$(realpath common/.. 2>/dev/null || echo ~/gki); else GKI_ROOT=~/gki; fi
+          # Common is at ~/gki/common
+          GKI_ROOT=~/gki
+          echo "GKI_ROOT=$GKI_ROOT"
+          ls "$GKI_ROOT/common/drivers" | head -n 5 || ls "$GKI_ROOT/drivers" | head -n 5 || true
+
+          # Setup SukiSU Ultra latest
+          cd "$GKI_ROOT"
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s
+
+          # Verify drivers/kernelsu linked
+          ls -l common/drivers/kernelsu 2>/dev/null || ls -l drivers/kernelsu 2>/dev/null || echo "kernelsu symlink check done"
+          cat common/drivers/Kconfig 2>/dev/null | grep -A2 kernelsu || cat drivers/Kconfig | grep -A2 kernelsu || true
+
+          # Enable KPM in defconfig (SukiSU KPM requires CONFIG_KPM=y + KALLSYMS)
+          DEFCONFIG=$(find ~/gki -name "gki_defconfig" | head -n1)
+          echo "Enabling CONFIG_KPM and KSU in $DEFCONFIG"
+          # Ensure KSU is enabled - SukiSU will set it via Kconfig, but ensure defconfig has it
+          if grep -q "# CONFIG_KSU is not set" "$DEFCONFIG"; then
+            sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' "$DEFCONFIG"
+          elif ! grep -q "CONFIG_KSU=" "$DEFCONFIG"; then
+            echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          fi
+          if grep -q "# CONFIG_KPM is not set" "$DEFCONFIG"; then
+            sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' "$DEFCONFIG"
+          elif ! grep -q "CONFIG_KPM=" "$DEFCONFIG"; then
+            echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+          fi
+          # KPM needs KALLSYMS_ALL already ensured
+          echo "=== KSU/KPM in defconfig ==="
+          grep -E "CONFIG_(KSU|KPM|KPROBES|KALLSYMS)" "$DEFCONFIG" || true
+
+      - name: Build GKI kernel
+        run: |
+          set -e
+          cd ~/gki
+          # Show toolchain info
+          ls -la prebuilts/ 2>/dev/null | head -n 20 || true
+          # Build - android13-5.10 uses build/build.sh
+          BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh 2>&1 | tee build.log
+          echo "=== Build finished ==="
+          ls -lh out/android13-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/ 2>/dev/null || find out -type f -name "Image*" | head -n 20
+          cat build.log | tail -n 100
+
+      - name: Prepare artifacts (AnyKernel3)
+        run: |
+          set -e
+          DIST=$(find ~/gki/out -type d -name dist | head -n1)
+          echo "DIST=$DIST"
+          ls -lh "$DIST"
+
+          # Copy kernel images
+          mkdir -p /tmp/artifacts
+          cp -v "$DIST/Image" /tmp/artifacts/ 2>/dev/null || true
+          cp -v "$DIST/Image.lz4" /tmp/artifacts/ 2>/dev/null || true
+          cp -v "$DIST/Image.gz" /tmp/artifacts/ 2>/dev/null || true
+          cp -v "$DIST/boot.img" /tmp/artifacts/ 2>/dev/null || true
+          cp -v "$DIST/*.ko" /tmp/artifacts/ 2>/dev/null || true
+
+          # Build AnyKernel3 zip
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
+          cp -v "$DIST/Image" /tmp/AnyKernel3/Image 2>/dev/null || cp -v "$DIST/Image.lz4" /tmp/AnyKernel3/Image.lz4 2>/dev/null || true
+          # Keep original Image if both exist, prefer uncompressed Image
+          if [ -f /tmp/artifacts/Image ]; then cp -v /tmp/artifacts/Image /tmp/AnyKernel3/; fi
+          if [ -f /tmp/artifacts/Image.lz4 ]; then cp -v /tmp/artifacts/Image.lz4 /tmp/AnyKernel3/; fi
+
+          # Setup anykernel.sh for marble GKI (use Image)
+          cat > /tmp/AnyKernel3/anykernel.sh <<'AKSH'
+          # AnyKernel3 Ramdisk Mod Script
+          # osm0sis @ xda-developers
+          properties() { '
+          kernel.string=marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM by lakitu12
+          do.devicecheck=0
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=marble
+          device.name2=marble_global
+          device.name3=marble_in
+          supported.versions=
+          supported.patchlevels=
+          '; }
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+          AKSH
+          # Ensure AnyKernel3 has version
+          echo "marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM-$(date +%Y%m%d)" > /tmp/AnyKernel3/version
+
+          cd /tmp/AnyKernel3
+          zip -r9 /tmp/artifacts/AnyKernel3-marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM.zip * -x .git/\* README.md *placeholder
+          ls -lh /tmp/artifacts/
+          # Also plain boot.img if built
+          if [ -f "$DIST/boot.img" ]; then
+            cp -v "$DIST/boot.img" /tmp/artifacts/boot-marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM.img
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM
+          path: /tmp/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Summary
+        run: |
+          echo "### Build complete - marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Base: common-android13-5.10 (5.10.236)" >> $GITHUB_STEP_SUMMARY
+          echo "- DroidSpaces: SYSVIPC + POSIX_MQUEUE kABI patches + gki_defconfig fragment" >> $GITHUB_STEP_SUMMARY
+          echo "- Root: SukiSU Ultra latest + CONFIG_KPM=y" >> $GITHUB_STEP_SUMMARY
+          echo "- Device: marble (SM7475) HyperOS 3.0 Android 15" >> $GITHUB_STEP_SUMMARY
+          ls -lh /tmp/artifacts/ >> $GITHUB_STEP_SUMMARY 2>&1 || true
