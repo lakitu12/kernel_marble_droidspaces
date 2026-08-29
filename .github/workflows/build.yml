@@ -147,29 +147,47 @@ jobs:
           # Enable KPM in defconfig (SukiSU KPM requires CONFIG_KPM=y + KALLSYMS)
           DEFCONFIG=$(find ~/gki -name "gki_defconfig" | head -n1)
           echo "Enabling CONFIG_KPM and KSU in $DEFCONFIG"
-          # Ensure KSU is enabled - SukiSU will set it via Kconfig, but ensure defconfig has it
+          echo "--- before ---"
+          grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" || echo "not found before"
+          # Ensure KSU is enabled - force add/replace
           if grep -q "# CONFIG_KSU is not set" "$DEFCONFIG"; then
             sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' "$DEFCONFIG"
-          elif ! grep -q "CONFIG_KSU=" "$DEFCONFIG"; then
-            echo "CONFIG_KSU=y" >> "$DEFCONFIG"
           fi
+          # Remove any existing line and re-add to ensure y
+          sed -i '/CONFIG_KSU=/d' "$DEFCONFIG"
+          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
           if grep -q "# CONFIG_KPM is not set" "$DEFCONFIG"; then
             sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' "$DEFCONFIG"
-          elif ! grep -q "CONFIG_KPM=" "$DEFCONFIG"; then
-            echo "CONFIG_KPM=y" >> "$DEFCONFIG"
           fi
+          sed -i '/CONFIG_KPM=/d' "$DEFCONFIG"
+          echo "CONFIG_KPM=y" >> "$DEFCONFIG"
           # KPM needs KALLSYMS_ALL already ensured
-          echo "=== KSU/KPM in defconfig ==="
+          echo "--- after ---"
           grep -E "CONFIG_(KSU|KPM|KPROBES|KALLSYMS)" "$DEFCONFIG" || true
+          echo "=== tail defconfig ==="
+          tail -n 20 "$DEFCONFIG"
 
       - name: Build GKI kernel
         run: |
           set -e
+          # Add 8GB swap to avoid LTO OOM (exit 143) on 7GB runner
+          echo "=== Setup swap ==="
+          sudo swapoff -a 2>/dev/null || true
+          sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          # Reduce parallelism to avoid OOM: -j2 for LTO
+          echo "=== CPU ==="
+          nproc
+          cat /proc/meminfo | head -n 20
+
           cd ~/gki
           # Show toolchain info
           ls -la prebuilts/ 2>/dev/null | head -n 20 || true
-          # Build - android13-5.10 uses build/build.sh
-          BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh 2>&1 | tee build.log
+          # Build - android13-5.10 uses build/build.sh with limited jobs
+          BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tee build.log
           echo "=== Build finished ==="
           ls -lh out/android13-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/ 2>/dev/null || find out -type f -name "Image*" | head -n 20
           cat build.log | tail -n 100
