@@ -202,6 +202,30 @@ jobs:
           echo "=== tail defconfig ==="
           tail -n 20 "$DEFCONFIG"
 
+      - name: Apply SUSFS patches (KSU build)
+        run: |
+          set -e
+          git clone -q https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android12-5.10 /tmp/susfs4ksu
+          cd /tmp/susfs4ksu
+          SUSFS_COMMIT=$(git rev-parse HEAD)
+          SUSFS_VER=$(grep -m1 'SUSFS_VERSION' kernel_patches/include/linux/susfs.h | cut -d'"' -f2 || echo unknown)
+          echo "SUSFS $SUSFS_VER @ $SUSFS_COMMIT"
+          KD=~/gki/common
+          [ -d "$KD" ] || KD=~/gki/kernel/common
+          cp -v kernel_patches/fs/* "$KD/fs/"
+          cp -v kernel_patches/include/linux/* "$KD/include/linux/"
+          cd "$KD"
+          echo "=== apply 50_add_susfs_in_gki-android12-5.10.patch ==="
+          patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch
+          # SUSFS configs (mirrors WildKernels known-good set)
+          DEFCONFIG=$KD/arch/arm64/configs/gki_defconfig
+          for CFG in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+            sed -i "/^# CONFIG_${CFG} is not set/d; /^CONFIG_${CFG}=/d" "$DEFCONFIG"
+            echo "CONFIG_${CFG}=y" >> "$DEFCONFIG"
+          done
+          grep -E "CONFIG_KSU" "$DEFCONFIG" | tail -n 20
+          git status --short | head -n 20
+
       - name: Build GKI kernel
         run: |
           set -e
@@ -246,7 +270,7 @@ jobs:
           cp -v "$DIST/Image" /tmp/ak3-images/Image-ksu
           # BYPASS variant = same kernel, KernelSU/KPM compiled out (no root; bypass = skip KSU install)
           DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
-          sed -i 's/^CONFIG_KSU=y/# CONFIG_KSU is not set/; s/^CONFIG_KPM=y/# CONFIG_KPM is not set/' "$DEFCONFIG"
+          sed -i -E 's/^(CONFIG_KSU[A-Z_]*)=y/# \1 is not set/; s/^CONFIG_KPM=y/# CONFIG_KPM is not set/' "$DEFCONFIG"
           grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" || true
           cd ~/gki
           KMI_SYMBOL_LIST_STRICT_MODE=0 BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tail -n 5
@@ -341,7 +365,7 @@ jobs:
           echo "### Build complete - marble GKI 5.10.236-android12 (2025-05 pinned) DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- Base: common-android12-5.10-2025-05 pinned (5.10.236-android12-9) + BYPASS no-KSU Image" >> $GITHUB_STEP_SUMMARY
-          echo "- DroidSpaces: SYSVIPC + POSIX_MQUEUE kABI patches + gki_defconfig fragment" >> $GITHUB_STEP_SUMMARY
+          echo "- DroidSpaces: kABI patches + SUSFS (gki-android12-5.10) + LTO_THIN/CFI stock-compatible" >> $GITHUB_STEP_SUMMARY
           echo "- Root: SukiSU Ultra latest + CONFIG_KPM=y" >> $GITHUB_STEP_SUMMARY
           echo "- Device: marble (SM7475) HyperOS 3.0 Android 15" >> $GITHUB_STEP_SUMMARY
           ls -lh /tmp/artifacts/ >> $GITHUB_STEP_SUMMARY 2>&1 || true
