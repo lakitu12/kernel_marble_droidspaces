@@ -53,9 +53,10 @@ jobs:
           du -sh ~/gki
           # Fail fast if version drifted from 5.10.236
           KD=$(ls -d common 2>/dev/null || ls -d kernel/common 2>/dev/null)
-          SUB=$(grep -E "^SUBLEVEL" "$KD/Makefile")
+          SUB=$(grep -E "^[[:space:]]*SUBLEVEL" "$KD/Makefile" | head -n1)
           echo "Makefile $SUB | common HEAD: $(git -C "$KD" log --oneline -1 || echo n/a)"
-          echo "$SUB" | grep -q "SUBLEVEL=236" || { echo "::error::kernel source is not 5.10.236 (got: $SUB) - manifest pin broken"; exit 1; }
+          # GNU style Makefile uses 'SUBLEVEL = 236' (spaces), tolerate both
+          echo "$SUB" | grep -Eq "SUBLEVEL[[:space:]]*=[[:space:]]*236" || { echo "::error::kernel source is not 5.10.236 (got: $SUB) - manifest pin broken"; exit 1; }
           find . -name "gki_defconfig" | head -n 5
 
       - name: Apply DroidSpaces kABI patches (GKI 5.10)
