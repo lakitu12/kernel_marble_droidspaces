@@ -223,7 +223,7 @@ jobs:
           echo "kernel: $KVER"
           echo "$KVER" | grep -q "5.10.236-android12-9-droidspaces-lakitu" || { echo "::error::version drifted: $KVER"; exit 1; }
 
-          CFG=$HOME/.github/scripts/extract-ikconfig
+          CFG=$GITHUB_WORKSPACE/.github/scripts/extract-ikconfig
           chmod +x "$CFG"
           "$CFG" "$DIST/Image" > /tmp/built-config
           grep -E "CONFIG_LTO_CLANG_THIN=|CONFIG_CFI_CLANG=|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=" /tmp/built-config
