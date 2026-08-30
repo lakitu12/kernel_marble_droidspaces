@@ -1,4 +1,4 @@
-name: Build marble GKI 5.10.236 - DroidSpaces + SukiSU Ultra (KPM)
+name: Build marble GKI 5.10.236 - DroidSpaces + SukiSU Ultra (KPM + SUSFS)
 
 on:
   workflow_dispatch:
@@ -6,12 +6,19 @@ on:
     branches: [main, master]
     paths:
       - '.github/workflows/build.yml'
+      - '.github/scripts/**'
       - 'README.md'
 
 jobs:
   build:
+    # KSU (root + SUSFS + KPM) and BYPASS (no-KSU) builds are independent:
+    # run them in parallel on separate runners (~18min total instead of ~35 serial)
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ksu, bypass]
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -57,6 +64,12 @@ jobs:
           echo "Makefile $SUB | common HEAD: $(git -C "$KD" log --oneline -1 || echo n/a)"
           # GNU style Makefile uses 'SUBLEVEL = 236' (spaces), tolerate both
           echo "$SUB" | grep -Eq "SUBLEVEL[[:space:]]*=[[:space:]]*236" || { echo "::error::kernel source is not 5.10.236 (got: $SUB) - manifest pin broken"; exit 1; }
+          # Deterministic version string: .scmversion short-circuits scripts/setlocalversion
+          # (it cats the file and returns BEFORE the git/-dirty logic; mrproper does not delete it).
+          # BRANCH=android12-5.10 + KMI_GENERATION=9 are exported by build.config.common, so this
+          # yields: 5.10.236-android12-9-droidspaces-lakitu  (replaces the -dirty suffix)
+          printf -- '-android12-9-droidspaces-lakitu' > "$KD/.scmversion"
+          cat "$KD/.scmversion"; echo
           find . -name "gki_defconfig" | head -n 5
 
       - name: Apply DroidSpaces kABI patches (GKI 5.10)
@@ -70,28 +83,21 @@ jobs:
           # Find kernel common dir (manifest puts kernel in ./common)
           if [ -d common ]; then KDIR=common; elif [ -d kernel/common ]; then KDIR=kernel/common; else KDIR=$(find . -name "Kconfig" -path "*/arch/arm64/*" | head -n1 | xargs dirname | xargs dirname | xargs dirname); fi
           echo "KDIR=$KDIR"
-          ls "$KDIR" | head -n 20
 
           cd "$KDIR"
-          # 1) SYSVIPC kABI fix - must succeed, try 6_7_8 variant first
+          # 1) SYSVIPC kABI fix - must succeed
           echo "=== Apply 001 SYSVIPC kABI ==="
           patch -p1 < /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kabi_6_7_8.patch
-          echo "001 applied: $?"
-
           # 2) POSIX_MQUEUE kABI fix - only for 5.10 and below
           echo "=== Apply 002 POSIX_MQUEUE kABI (5.10 only) ==="
           patch -p1 < /tmp/Droidspaces-OSS/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch
-          echo "002 applied: $?"
 
-          # Show patched files
           git diff --stat || true
 
       - name: Patch gki_defconfig for DroidSpaces
         run: |
           set -e
           DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
-          echo "DEFCONFIG=$DEFCONFIG"
-          cat "$DEFCONFIG" | head -n 50
 
           # Helper: ensure CONFIG_FOO=y (replace is not set or append)
           ensure_y() {
@@ -130,7 +136,7 @@ jobs:
           ensure_y IP_SET_HASH_NET
           ensure_y NETFILTER_XT_SET
 
-          # KPROBES is required by KSU/SukiSU
+          # KPROBES/KALLSYMS for KSU/SukiSU (harmless in bypass too)
           ensure_y KPROBES
           ensure_y KALLSYMS
           ensure_y KALLSYMS_ALL
@@ -147,151 +153,100 @@ jobs:
           grep -E "CONFIG_LTO|CONFIG_CFI" "$DEFCONFIG" || true
 
           # Bypass GKI savedefconfig check (fragment appended at end, not sorted)
-          echo "=== Bypass check_defconfig for CI ==="
-          echo "--- before POST_DEFCONFIG_CMDS ---"
-          cat ~/gki/common/build.config.gki || true
           sed -i 's/POST_DEFCONFIG_CMDS="check_defconfig"/POST_DEFCONFIG_CMDS="true"/' ~/gki/common/build.config.gki || true
-          echo "--- after POST_DEFCONFIG_CMDS ---"
-          cat ~/gki/common/build.config.gki || true
-
-          echo "=== gki_defconfig diff ==="
-          grep -E "CONFIG_(SYSVIPC|POSIX_MQUEUE|IPC_NS|PID_NS|DEVTMPFS|USER_NS|KPROBES|KPM|KSU)" "$DEFCONFIG" || true
-          # Show full file tail
-          echo "--- tail ---"
+          echo "=== gki_defconfig tail ==="
           tail -n 30 "$DEFCONFIG"
 
-      - name: Setup SukiSU Ultra + KPM
+      - name: Setup SukiSU Ultra builtin + KPM + SUSFS configs
+        if: matrix.variant == 'ksu'
         run: |
           set -e
           cd ~/gki
-          # Detect GKI root (where drivers/ lives)
-          if [ -d common ]; then GKI_ROOT=$(realpath common/.. 2>/dev/null || echo ~/gki); else GKI_ROOT=~/gki; fi
-          # Common is at ~/gki/common
-          GKI_ROOT=~/gki
-          echo "GKI_ROOT=$GKI_ROOT"
-          ls "$GKI_ROOT/common/drivers" | head -n 5 || ls "$GKI_ROOT/drivers" | head -n 5 || true
-
-          # Setup SukiSU Ultra latest
-          cd "$GKI_ROOT"
           # PIN builtin branch: it defines KSU_SUSFS* Kconfig symbols + KSU-side SUSFS impl.
           # No-arg setup.sh checks out latest release tag (main-based) which LACKS SUSFS symbols
           # -> all 10 KSU_SUSFS defconfig entries silently dropped by kconfig.
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+          ls -l common/drivers/kernelsu
 
-          # Verify drivers/kernelsu linked
-          ls -l common/drivers/kernelsu 2>/dev/null || ls -l drivers/kernelsu 2>/dev/null || echo "kernelsu symlink check done"
-          cat common/drivers/Kconfig 2>/dev/null | grep -A2 kernelsu || cat drivers/Kconfig | grep -A2 kernelsu || true
-
-          # Enable KPM in defconfig (SukiSU KPM requires CONFIG_KPM=y + KALLSYMS)
-          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
-          echo "Enabling CONFIG_KPM and KSU in $DEFCONFIG"
-          echo "--- before ---"
-          grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" || echo "not found before"
-          # Ensure KSU is enabled - force add/replace
-          if grep -q "# CONFIG_KSU is not set" "$DEFCONFIG"; then
-            sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' "$DEFCONFIG"
-          fi
-          # Remove any existing line and re-add to ensure y
-          sed -i '/CONFIG_KSU=/d' "$DEFCONFIG"
-          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
-          if grep -q "# CONFIG_KPM is not set" "$DEFCONFIG"; then
-            sed -i 's/# CONFIG_KPM is not set/CONFIG_KPM=y/' "$DEFCONFIG"
-          fi
-          sed -i '/CONFIG_KPM=/d' "$DEFCONFIG"
-          echo "CONFIG_KPM=y" >> "$DEFCONFIG"
-          # KPM needs KALLSYMS_ALL already ensured
-          echo "--- after ---"
-          grep -E "CONFIG_(KSU|KPM|KPROBES|KALLSYMS)" "$DEFCONFIG" || true
-          echo "=== tail defconfig ==="
-          tail -n 20 "$DEFCONFIG"
-
-      - name: Apply SUSFS patches (KSU build)
-        run: |
-          set -e
+          # SUSFS kernel-side files + GKI patch (KSU_SUSFS configs only exist on builtin Kconfig)
           git clone -q https://gitlab.com/simonpunk/susfs4ksu.git -b gki-android12-5.10 /tmp/susfs4ksu
-          cd /tmp/susfs4ksu
-          SUSFS_COMMIT=$(git rev-parse HEAD)
-          SUSFS_VER=$(grep -m1 'SUSFS_VERSION' kernel_patches/include/linux/susfs.h | cut -d'"' -f2 || echo unknown)
-          echo "SUSFS $SUSFS_VER @ $SUSFS_COMMIT"
-          KD=~/gki/common
-          [ -d "$KD" ] || KD=~/gki/kernel/common
-          cp -v kernel_patches/fs/* "$KD/fs/"
-          cp -v kernel_patches/include/linux/* "$KD/include/linux/"
-          cd "$KD"
+          SUSFS_VER=$(grep -m1 'SUSFS_VERSION' /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h | cut -d'"' -f2 || echo unknown)
+          echo "SUSFS $SUSFS_VER"
+          cp -v /tmp/susfs4ksu/kernel_patches/fs/* common/fs/
+          cp -v /tmp/susfs4ksu/kernel_patches/include/linux/* common/include/linux/
+          cd common
           echo "=== apply 50_add_susfs_in_gki-android12-5.10.patch ==="
           patch -p1 < /tmp/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch
-          # SUSFS configs (mirrors WildKernels known-good set)
-          DEFCONFIG=$KD/arch/arm64/configs/gki_defconfig
-          for CFG in KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+
+          # KSU + KPM + SUSFS configs (mirrors WildKernels known-good set)
+          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
+          for CFG in KSU KPM KSU_MANUAL_SU KSU_SUSFS KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
             sed -i "/^# CONFIG_${CFG} is not set/d; /^CONFIG_${CFG}=/d" "$DEFCONFIG"
             echo "CONFIG_${CFG}=y" >> "$DEFCONFIG"
           done
-          grep -E "CONFIG_KSU" "$DEFCONFIG" | tail -n 20
-          git status --short | head -n 20
+          grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" | tail -n 16
+
+      - name: BYPASS variant guard (no KSU/KPM)
+        if: matrix.variant == 'bypass'
+        run: |
+          set -e
+          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
+          # No SukiSU setup ran: purge any KSU/KPM leftovers, must stay clean
+          sed -i -E '/^CONFIG_KSU[A-Z_]*=y$/d; /^CONFIG_KPM=y$/d' "$DEFCONFIG"
+          grep -E "^(CONFIG_KSU|CONFIG_KPM)" "$DEFCONFIG" && { echo "::error::bypass defconfig must not enable KSU/KPM"; exit 1; } || echo "bypass defconfig clean (no KSU/KPM)"
 
       - name: Build GKI kernel
         run: |
           set -e
-          # Add 8GB swap to avoid LTO OOM (exit 143) on 7GB runner
-          echo "=== Setup swap ==="
+          # Add swap to avoid LTO OOM on 7GB runner
           sudo swapoff -a 2>/dev/null || true
           sudo fallocate -l 12G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=12288
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
           free -h
-          # Reduce parallelism to avoid OOM: -j2 for LTO
-          echo "=== CPU ==="
-          nproc
-          cat /proc/meminfo | head -n 20
 
           cd ~/gki
-          # Disable KMI strict check for CI (we disabled CFI/LTO, so __cfi_slowpath mismatch is expected)
-          echo "=== Disable KMI strict mode for CI ==="
-          # Patch build.config to allow mismatch: set KMI_SYMBOL_LIST_STRICT_MODE=0
-          grep -n "KMI_SYMBOL_LIST_STRICT_MODE" common/build.config.gki.aarch64 || true
+          # Disable KMI strict check for CI (kABI patches shift some CRCs by design)
           sed -i 's/KMI_SYMBOL_LIST_STRICT_MODE=1/KMI_SYMBOL_LIST_STRICT_MODE=0/' common/build.config.gki.aarch64 || true
-          grep -n "KMI" common/build.config.gki.aarch64 | head || true
-          # Show toolchain info
-          ls -la prebuilts/ 2>/dev/null | head -n 20 || true
-          # Build - android12-5.10 uses build/build.sh with limited jobs (use pipefail so KMI error fails build)
-          set -o pipefail
-          KMI_SYMBOL_LIST_STRICT_MODE=0 BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tee build.log || true
-          echo "build.sh exit: ${PIPESTATUS[0]}"
-          echo "=== Build finished ==="
-          ls -lh out/android12-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/ 2>/dev/null || find out -type f -name "Image*" | head -n 20
-          cat build.log | tail -n 100
 
-      - name: Version gate + build bypass (no-KSU) Image
+          set -o pipefail
+          KMI_SYMBOL_LIST_STRICT_MODE=0 BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tee build.log
+          echo "=== Build finished ==="
+          ls -lh out/android12-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/
+
+      - name: Version gate + ikconfig assertions (${{ matrix.variant }})
         run: |
           set -e
           DIST=$(find ~/gki/out -type d -name dist | head -n1)
           KVER=$(strings "$DIST/Image" | grep -m1 "Linux version 5")
-          echo "main KSU kernel: $KVER"
-          echo "$KVER" | grep -q "5.10.236-android12-9" || { echo "::error::built kernel drifted: $KVER (expected 5.10.236-android12-9)"; exit 1; }
-          mkdir -p /tmp/ak3-images
-          cp -v "$DIST/Image" /tmp/ak3-images/Image-ksu
-          # BYPASS variant = same kernel, KernelSU/KPM compiled out (no root; bypass = skip KSU install)
-          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
-          sed -i -E 's/^(CONFIG_KSU[A-Z_]*)=y/# \1 is not set/; s/^CONFIG_KPM=y/# CONFIG_KPM is not set/' "$DEFCONFIG"
-          grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" || true
-          cd ~/gki
-          KMI_SYMBOL_LIST_STRICT_MODE=0 BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tail -n 5
-          KVER2=$(strings "$DIST/Image" | grep -m1 "Linux version 5")
-          echo "bypass kernel: $KVER2"
-          echo "$KVER2" | grep -q "5.10.236-android12-9" || { echo "::error::bypass kernel drifted: $KVER2"; exit 1; }
-          cp -v "$DIST/Image" /tmp/ak3-images/Image-bypass
-          ls -lh /tmp/ak3-images/
+          echo "kernel: $KVER"
+          echo "$KVER" | grep -q "5.10.236-android12-9-droidspaces-lakitu" || { echo "::error::version drifted: $KVER"; exit 1; }
 
-      - name: Prepare artifacts (AnyKernel3 x2)
+          CFG=$HOME/.github/scripts/extract-ikconfig
+          chmod +x "$CFG"
+          "$CFG" "$DIST/Image" > /tmp/built-config
+          grep -E "CONFIG_LTO_CLANG_THIN=|CONFIG_CFI_CLANG=|CONFIG_SYSVIPC=|CONFIG_POSIX_MQUEUE=" /tmp/built-config
+          if [ "${{ matrix.variant }}" = "ksu" ]; then
+            grep -q "^CONFIG_KSU=y$" /tmp/built-config || { echo "::error::KSU missing in ksu build"; exit 1; }
+            grep -q "^CONFIG_KPM=y$" /tmp/built-config || { echo "::error::KPM missing in ksu build"; exit 1; }
+            grep -q "^CONFIG_KSU_SUSFS=y$" /tmp/built-config || { echo "::error::SUSFS missing in ksu build (builtin branch not applied?)"; exit 1; }
+          else
+            grep -Eq "^CONFIG_KSU=(y|m)$" /tmp/built-config && { echo "::error::KSU must be off in bypass build"; exit 1; }
+            grep -Eq "^CONFIG_KPM=(y|m)$" /tmp/built-config && { echo "::error::KPM must be off in bypass build"; exit 1; }
+            echo "bypass: KSU/KPM confirmed off"
+          fi
+          mkdir -p /tmp/ak3-images
+          if [ "${{ matrix.variant }}" = "ksu" ]; then
+            cp -v "$DIST/Image" /tmp/ak3-images/Image-ksu
+          else
+            cp -v "$DIST/Image" /tmp/ak3-images/Image-bypass
+          fi
+
+      - name: Prepare AnyKernel3 (${{ matrix.variant }})
         run: |
           set -e
           mkdir -p /tmp/artifacts
-          if [ ! -f /tmp/ak3-images/Image-ksu ] || [ ! -f /tmp/ak3-images/Image-bypass ]; then
-            echo "::error::kernel Images missing - version gate step failed"; ls -la /tmp/ak3-images/ || true; exit 1
-          fi
-          cp -v /tmp/ak3-images/Image-ksu /tmp/artifacts/Image-5.10.236-android12-KSU-KPM
-          cp -v /tmp/ak3-images/Image-bypass /tmp/artifacts/Image-5.10.236-android12-BYPASS-noKSU
           # Base: Numbersf/AnyKernel3 (SukiSU-Ultra main maintainer) - uppercase var
           # convention (BLOCK/IS_SLOT_DEVICE/NO_MAGISK_CHECK) that the SukiSU app
           # flasher expects. Lowercase osm0sis style was silently ignored by the
@@ -301,11 +256,11 @@ jobs:
           ### AnyKernel3 Ramdisk Mod Script
           ## marble GKI by lakitu12 (template: Numbersf/AnyKernel3, SukiSU app-compatible)
           ## osm0sis @ xda-developers
-          
+
           ### AnyKernel setup
           # global properties
           properties() { '
-          kernel.string=marble GKI 5.10.236-android12 DroidSpaces + SukiSU Ultra KPM by lakitu12
+          kernel.string=marble GKI 5.10.236-android12 DroidSpaces + SUSFS + SukiSU Ultra KPM by lakitu12
           do.devicecheck=0
           do.modules=0
           do.systemless=0
@@ -317,7 +272,7 @@ jobs:
           supported.patchlevels=
           supported.vendorpatchlevels=
           '; } # end properties
-          
+
           ### AnyKernel install
           ## boot shell variables
           BLOCK=boot
@@ -325,17 +280,17 @@ jobs:
           RAMDISK_COMPRESSION=auto
           PATCH_VBMETA_FLAG=auto
           NO_MAGISK_CHECK=1
-          
+
           # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
           . tools/ak3-core.sh
-          
+
           sync
           sleep 0.5
           chmod -R 755 $AKHOME/tools
-          
+
           ui_print " Installing marble GKI kernel..."
           ui_print " Splitting boot, replacing kernel, keeping stock ramdisk"
-          
+
           split_boot
           if [ -f "split_img/ramdisk.cpio" ]; then
               unpack_ramdisk
@@ -343,43 +298,36 @@ jobs:
           else
               flash_boot
           fi
-          
+
           ui_print " Done. Original ramdisk preserved."
           AKSH
-          pack_ak3() {
-            IMG="$1"; OUT="$2"
-            rm -rf /tmp/AnyKernel3
-            cp -r /tmp/AnyKernel3-template /tmp/AnyKernel3
-            rm -rf /tmp/AnyKernel3/.git /tmp/AnyKernel3/anykernel.sh
-            cp -v "$IMG" /tmp/AnyKernel3/Image
-            cp -v /tmp/ak3-anykernel.sh /tmp/AnyKernel3/anykernel.sh
-            chmod +x /tmp/AnyKernel3/tools/* /tmp/AnyKernel3/META-INF/com/google/android/update-binary
-            ( cd /tmp/AnyKernel3 && zip -r9 -q "/tmp/artifacts/$OUT" . )
-            echo "=== verify $OUT ==="
-            unzip -l "/tmp/artifacts/$OUT" | tail -n 5
-            unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "^BLOCK=boot" || { echo "::error::uppercase BLOCK missing"; exit 1; }
-            unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "split_boot|write_boot" || { echo "::error::anykernel.sh missing install calls"; exit 1; }
-            unzip -p "/tmp/artifacts/$OUT" Image | strings | grep -m1 "Linux version 5.10.236" || { echo "::error::wrong Image packed"; exit 1; }
-            unzip -p "/tmp/artifacts/$OUT" META-INF/com/google/android/updater-script | grep AK_BASE || true
-          }
-          pack_ak3 /tmp/ak3-images/Image-ksu "AnyKernel3-marble-5.10.236-android12-DroidSpaces-SukiSU-KPM.zip"
-          pack_ak3 /tmp/ak3-images/Image-bypass "AnyKernel3-marble-5.10.236-android12-DroidSpaces-BYPASS-noKSU.zip"
+          if [ "${{ matrix.variant }}" = "ksu" ]; then
+            IMG=/tmp/ak3-images/Image-ksu
+            OUT="AnyKernel3-marble-5.10.236-android12-DroidSpaces-SUSFS-SukiSU-KPM.zip"
+            RAW="Image-5.10.236-android12-9-droidspaces-lakitu-KSU-KPM"
+          else
+            IMG=/tmp/ak3-images/Image-bypass
+            OUT="AnyKernel3-marble-5.10.236-android12-DroidSpaces-BYPASS-noKSU.zip"
+            RAW="Image-5.10.236-android12-9-droidspaces-lakitu-BYPASS-noKSU"
+          fi
+          rm -rf /tmp/AnyKernel3
+          cp -r /tmp/AnyKernel3-template /tmp/AnyKernel3
+          rm -rf /tmp/AnyKernel3/.git /tmp/AnyKernel3/anykernel.sh
+          cp -v "$IMG" /tmp/AnyKernel3/Image
+          cp -v /tmp/ak3-anykernel.sh /tmp/AnyKernel3/anykernel.sh
+          chmod +x /tmp/AnyKernel3/tools/* /tmp/AnyKernel3/META-INF/com/google/android/update-binary
+          ( cd /tmp/AnyKernel3 && zip -r9 -q "/tmp/artifacts/$OUT" . )
+          cp -v "$IMG" "/tmp/artifacts/$RAW"
+          echo "=== verify $OUT ==="
+          unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "^BLOCK=boot" || { echo "::error::uppercase BLOCK missing"; exit 1; }
+          unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "split_boot|write_boot" || { echo "::error::anykernel.sh missing install calls"; exit 1; }
+          unzip -p "/tmp/artifacts/$OUT" Image | strings | grep -m1 "droidspaces-lakitu" || { echo "::error::wrong Image packed"; exit 1; }
           ls -lh /tmp/artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: marble-5.10.236-android12-DroidSpaces-SukiSU-KPM
+          name: marble-5.10.236-android12-${{ matrix.variant }}
           path: /tmp/artifacts/*
           if-no-files-found: error
           retention-days: 14
-
-      - name: Summary
-        run: |
-          echo "### Build complete - marble GKI 5.10.236-android12 (2025-05 pinned) DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Base: common-android12-5.10-2025-05 pinned (5.10.236-android12-9) + BYPASS no-KSU Image" >> $GITHUB_STEP_SUMMARY
-          echo "- DroidSpaces: kABI patches + SUSFS (gki-android12-5.10) + LTO_THIN/CFI stock-compatible" >> $GITHUB_STEP_SUMMARY
-          echo "- Root: SukiSU Ultra latest + CONFIG_KPM=y" >> $GITHUB_STEP_SUMMARY
-          echo "- Device: marble (SM7475) HyperOS 3.0 Android 15" >> $GITHUB_STEP_SUMMARY
-          ls -lh /tmp/artifacts/ >> $GITHUB_STEP_SUMMARY 2>&1 || true
