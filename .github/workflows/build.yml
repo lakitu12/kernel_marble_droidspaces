@@ -135,15 +135,15 @@ jobs:
           ensure_y KALLSYMS
           ensure_y KALLSYMS_ALL
 
-          # Fix LTO OOM (exit 143) on 7GB runner: disable LTO for CI
-          # GKI 5.10 default is LTO_CLANG_FULL which needs >16GB for vmlinux.o
-          echo "=== Disable LTO for CI ==="
-          # Remove existing LTO configs and force NONE
+          # LTO/CFI MUST match stock kernel environment or vendor_dlkm modules
+          # fail to load -> bootloop. Stock marble uses LTO_CLANG_FULL + CFI_CLANG.
+          # CI OOM fix: use LTO_CLANG_THIN (Wild-Kernels style; memory-friendly but
+          # still real LTO so CONFIG_CFI_CLANG keeps working). NEVER use LTO_NONE.
+          echo "=== LTO_THIN + keep CFI (stock-compatible) ==="
           sed -i '/CONFIG_LTO/d' "$DEFCONFIG"
-          sed -i '/CONFIG_CFI_CLANG/d' "$DEFCONFIG"
-          echo "CONFIG_LTO_NONE=y" >> "$DEFCONFIG"
-          echo "# CONFIG_LTO_CLANG is not set" >> "$DEFCONFIG"
-          echo "# CONFIG_CFI_CLANG is not set" >> "$DEFCONFIG"
+          echo "# CONFIG_LTO_NONE is not set" >> "$DEFCONFIG"
+          echo "CONFIG_LTO_CLANG_THIN=y" >> "$DEFCONFIG"
+          # CONFIG_CFI_CLANG stays as stock (y); do not touch it
           grep -E "CONFIG_LTO|CONFIG_CFI" "$DEFCONFIG" || true
 
           # Bypass GKI savedefconfig check (fragment appended at end, not sorted)
