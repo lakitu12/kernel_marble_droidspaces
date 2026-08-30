@@ -292,12 +292,18 @@ jobs:
           fi
           cp -v /tmp/ak3-images/Image-ksu /tmp/artifacts/Image-5.10.236-android12-KSU-KPM
           cp -v /tmp/ak3-images/Image-bypass /tmp/artifacts/Image-5.10.236-android12-BYPASS-noKSU
-          # Complete anykernel.sh: previous generated one only had the properties block
-          # (no . ak3-core.sh / split_boot / write_boot) -> flashing it did NOTHING.
-          # Flow mirrors Wild Kernels reference: split_boot -> keep stock ramdisk -> write_boot.
+          # Base: Numbersf/AnyKernel3 (SukiSU-Ultra main maintainer) - uppercase var
+          # convention (BLOCK/IS_SLOT_DEVICE/NO_MAGISK_CHECK) that the SukiSU app
+          # flasher expects. Lowercase osm0sis style was silently ignored by the
+          # app flasher ("flash failed, no details").
+          git clone --depth=1 -q https://github.com/Numbersf/AnyKernel3 /tmp/AnyKernel3-template
           cat > /tmp/ak3-anykernel.sh <<'AKSH'
-          # AnyKernel3 Ramdisk Mod Script
-          # osm0sis @ xda-developers
+          ### AnyKernel3 Ramdisk Mod Script
+          ## marble GKI by lakitu12 (template: Numbersf/AnyKernel3, SukiSU app-compatible)
+          ## osm0sis @ xda-developers
+          
+          ### AnyKernel setup
+          # global properties
           properties() { '
           kernel.string=marble GKI 5.10.236-android12 DroidSpaces + SukiSU Ultra KPM by lakitu12
           do.devicecheck=0
@@ -305,51 +311,56 @@ jobs:
           do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
-          do.check_boot_version=0
           device.name1=marble
           device.name2=marblein
           supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
-          keycheck.timeout=20
           '; } # end properties
           
-          # boot shell variables
-          block=boot
-          is_slot_device=auto
-          ramdisk_compression=auto
-          patch_vbmeta_flag=auto
-          no_magisk_check=1
+          ### AnyKernel install
+          ## boot shell variables
+          BLOCK=boot
+          IS_SLOT_DEVICE=auto
+          RAMDISK_COMPRESSION=auto
+          PATCH_VBMETA_FLAG=auto
+          NO_MAGISK_CHECK=1
           
           # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
           . tools/ak3-core.sh
           
-          # boot install: dump current boot, replace only the kernel, keep the stock ramdisk
-          split_boot
+          sync
+          sleep 0.5
+          chmod -R 755 $AKHOME/tools
           
-          if [ -f "$SPLITIMG/ramdisk.cpio" ]; then
-              # marble stock boot carries a ramdisk -> repack preserves it, only kernel is swapped
+          ui_print " Installing marble GKI kernel..."
+          ui_print " Splitting boot, replacing kernel, keeping stock ramdisk"
+          
+          split_boot
+          if [ -f "split_img/ramdisk.cpio" ]; then
               unpack_ramdisk
               write_boot
           else
               flash_boot
           fi
           
-          ui_print " "
-          ui_print "Kernel flashed. Original ramdisk preserved."
+          ui_print " Done. Original ramdisk preserved."
           AKSH
           pack_ak3() {
             IMG="$1"; OUT="$2"
             rm -rf /tmp/AnyKernel3
-            git clone --depth=1 -q https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
-            rm -f /tmp/AnyKernel3/README.md /tmp/AnyKernel3/anykernel.sh
+            cp -r /tmp/AnyKernel3-template /tmp/AnyKernel3
+            rm -rf /tmp/AnyKernel3/.git /tmp/AnyKernel3/anykernel.sh
             cp -v "$IMG" /tmp/AnyKernel3/Image
             cp -v /tmp/ak3-anykernel.sh /tmp/AnyKernel3/anykernel.sh
-            ( cd /tmp/AnyKernel3 && zip -r9 "/tmp/artifacts/$OUT" * )
+            chmod +x /tmp/AnyKernel3/tools/* /tmp/AnyKernel3/META-INF/com/google/android/update-binary
+            ( cd /tmp/AnyKernel3 && zip -r9 -q "/tmp/artifacts/$OUT" . )
             echo "=== verify $OUT ==="
-            unzip -l "/tmp/artifacts/$OUT" | tail -n 8
-            unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "split_boot|write_boot|ak3-core.sh" || { echo "::error::anykernel.sh missing install calls"; exit 1; }
+            unzip -l "/tmp/artifacts/$OUT" | tail -n 5
+            unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "^BLOCK=boot" || { echo "::error::uppercase BLOCK missing"; exit 1; }
+            unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "split_boot|write_boot" || { echo "::error::anykernel.sh missing install calls"; exit 1; }
             unzip -p "/tmp/artifacts/$OUT" Image | strings | grep -m1 "Linux version 5.10.236" || { echo "::error::wrong Image packed"; exit 1; }
+            unzip -p "/tmp/artifacts/$OUT" META-INF/com/google/android/updater-script | grep AK_BASE || true
           }
           pack_ak3 /tmp/ak3-images/Image-ksu "AnyKernel3-marble-5.10.236-android12-DroidSpaces-SukiSU-KPM.zip"
           pack_ak3 /tmp/ak3-images/Image-bypass "AnyKernel3-marble-5.10.236-android12-DroidSpaces-BYPASS-noKSU.zip"
