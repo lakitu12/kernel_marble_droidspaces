@@ -173,7 +173,10 @@ jobs:
 
           # Setup SukiSU Ultra latest
           cd "$GKI_ROOT"
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s
+          # PIN builtin branch: it defines KSU_SUSFS* Kconfig symbols + KSU-side SUSFS impl.
+          # No-arg setup.sh checks out latest release tag (main-based) which LACKS SUSFS symbols
+          # -> all 10 KSU_SUSFS defconfig entries silently dropped by kconfig.
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
 
           # Verify drivers/kernelsu linked
           ls -l common/drivers/kernelsu 2>/dev/null || ls -l drivers/kernelsu 2>/dev/null || echo "kernelsu symlink check done"
