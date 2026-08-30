@@ -31,17 +31,22 @@ jobs:
           chmod a+x ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
 
-      - name: Sync GKI source (android12-5.10 - 5.10.236)
+      - name: Sync GKI source (PINNED common-android12-5.10-2025-05 = 5.10.236)
         run: |
           mkdir -p ~/gki
           cd ~/gki
-          # --depth=1 to save time/disk, a/b GKI doesn't need full history
-          repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10 --depth=1
+          # PINNED monthly release manifest: marble stock is 5.10.236-android12-9-00003-gfb24cf99ad97 (2025-05, base tag android12-5.10-2025-05_r6)
+          # NEVER track branch HEAD common-android12-5.10 - it drifts (2026-08 HEAD built 5.10.264-android12-9 -> vermagic/driver mismatch vs vendor)
+          repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10-2025-05 --depth=1
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --optimized-fetch --prune
           echo "=== sync done ==="
           du -sh ~/gki
+          # Fail fast if version drifted from 5.10.236
+          KD=$(ls -d common 2>/dev/null || ls -d kernel/common 2>/dev/null)
+          SUB=$(grep -E "^SUBLEVEL" "$KD/Makefile")
+          echo "Makefile $SUB | common HEAD: $(git -C "$KD" log --oneline -1 || echo n/a)"
+          echo "$SUB" | grep -q "SUBLEVEL=236" || { echo "::error::kernel source is not 5.10.236 (got: $SUB) - manifest pin broken"; exit 1; }
           find . -name "gki_defconfig" | head -n 5
-          ls -R | head -n 100
 
       - name: Apply DroidSpaces kABI patches (GKI 5.10)
         run: |
@@ -219,85 +224,112 @@ jobs:
           ls -lh out/android12-5.10/dist/ 2>/dev/null || ls -lh out/*/dist/ 2>/dev/null || find out -type f -name "Image*" | head -n 20
           cat build.log | tail -n 100
 
-      - name: Prepare artifacts (AnyKernel3)
+      - name: Version gate + build bypass (no-KSU) Image
         run: |
           set -e
           DIST=$(find ~/gki/out -type d -name dist | head -n1)
-          echo "DIST=$DIST"
-          ls -lh "$DIST" || true
-          echo "=== fallback: find Image in out ==="
-          find ~/gki/out -name "Image" -type f | head -n 10 || true
-          # If dist has no Image, copy from build out directly
-          if [ ! -f "$DIST/Image" ]; then
-            SRC=$(find ~/gki/out -path "*/arch/arm64/boot/Image" | head -n1)
-            if [ -n "$SRC" ]; then
-              echo "Copy Image from $SRC to DIST"
-              cp -v "$SRC" "$DIST/" || true
-              cp -v "$(dirname $SRC)/Image.lz4" "$DIST/" 2>/dev/null || true
-              cp -v "$(dirname $SRC)/Image.gz" "$DIST/" 2>/dev/null || true
-              ls -lh "$DIST" || true
-            fi
-          fi
+          KVER=$(strings "$DIST/Image" | grep -m1 "Linux version 5")
+          echo "main KSU kernel: $KVER"
+          echo "$KVER" | grep -q "5.10.236-android12-9" || { echo "::error::built kernel drifted: $KVER (expected 5.10.236-android12-9)"; exit 1; }
+          mkdir -p /tmp/ak3-images
+          cp -v "$DIST/Image" /tmp/ak3-images/Image-ksu
+          # BYPASS variant = same kernel, KernelSU/KPM compiled out (no root; bypass = skip KSU install)
+          DEFCONFIG=~/gki/common/arch/arm64/configs/gki_defconfig
+          sed -i 's/^CONFIG_KSU=y/# CONFIG_KSU is not set/; s/^CONFIG_KPM=y/# CONFIG_KPM is not set/' "$DEFCONFIG"
+          grep -E "CONFIG_(KSU|KPM)" "$DEFCONFIG" || true
+          cd ~/gki
+          KMI_SYMBOL_LIST_STRICT_MODE=0 BUILD_CONFIG=common/build.config.gki.aarch64 build/build.sh -j2 2>&1 | tail -n 5
+          KVER2=$(strings "$DIST/Image" | grep -m1 "Linux version 5")
+          echo "bypass kernel: $KVER2"
+          echo "$KVER2" | grep -q "5.10.236-android12-9" || { echo "::error::bypass kernel drifted: $KVER2"; exit 1; }
+          cp -v "$DIST/Image" /tmp/ak3-images/Image-bypass
+          ls -lh /tmp/ak3-images/
 
-          # Copy kernel images
+      - name: Prepare artifacts (AnyKernel3 x2)
+        run: |
+          set -e
           mkdir -p /tmp/artifacts
-          cp -v "$DIST/Image" /tmp/artifacts/ 2>/dev/null || true
-          cp -v "$DIST/Image.lz4" /tmp/artifacts/ 2>/dev/null || true
-          cp -v "$DIST/Image.gz" /tmp/artifacts/ 2>/dev/null || true
-          cp -v "$DIST/boot.img" /tmp/artifacts/ 2>/dev/null || true
-          cp -v "$DIST/*.ko" /tmp/artifacts/ 2>/dev/null || true
-
-          # Build AnyKernel3 zip
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
-          # Only copy raw Image (boot.img is HEADER_VER 4 raw, not lz4) - avoid dual Image confusion where AK3 picks Image first anyway
-          cp -v "$DIST/Image" /tmp/AnyKernel3/Image 2>/dev/null || cp -v "$DIST/Image.lz4" /tmp/AnyKernel3/Image.lz4 2>/dev/null || true
-
-          # Setup anykernel.sh for marble GKI (use Image)
-          cat > /tmp/AnyKernel3/anykernel.sh <<'AKSH'
+          if [ ! -f /tmp/ak3-images/Image-ksu ] || [ ! -f /tmp/ak3-images/Image-bypass ]; then
+            echo "::error::kernel Images missing - version gate step failed"; ls -la /tmp/ak3-images/ || true; exit 1
+          fi
+          cp -v /tmp/ak3-images/Image-ksu /tmp/artifacts/Image-5.10.236-android12-KSU-KPM
+          cp -v /tmp/ak3-images/Image-bypass /tmp/artifacts/Image-5.10.236-android12-BYPASS-noKSU
+          # Complete anykernel.sh: previous generated one only had the properties block
+          # (no . ak3-core.sh / split_boot / write_boot) -> flashing it did NOTHING.
+          # Flow mirrors Wild Kernels reference: split_boot -> keep stock ramdisk -> write_boot.
+          cat > /tmp/ak3-anykernel.sh <<'AKSH'
           # AnyKernel3 Ramdisk Mod Script
           # osm0sis @ xda-developers
           properties() { '
-          kernel.string=marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM by lakitu12
+          kernel.string=marble GKI 5.10.236-android12 DroidSpaces + SukiSU Ultra KPM by lakitu12
           do.devicecheck=0
           do.modules=0
-          do.systemless=1
+          do.systemless=0
           do.cleanup=1
           do.cleanuponabort=0
+          do.check_boot_version=0
           device.name1=marble
-          device.name2=marble_global
-          device.name3=marble_in
+          device.name2=marblein
           supported.versions=
           supported.patchlevels=
-          '; }
-          block=/dev/block/bootdevice/by-name/boot;
-          is_slot_device=1;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
-          AKSH
-          # Ensure AnyKernel3 has version
-          echo "marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM-$(date +%Y%m%d)" > /tmp/AnyKernel3/version
-
-          cd /tmp/AnyKernel3
-          zip -r9 /tmp/artifacts/AnyKernel3-marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM.zip * -x .git/\* README.md *placeholder
-          ls -lh /tmp/artifacts/
-          # Also plain boot.img if built
-          if [ -f "$DIST/boot.img" ]; then
-            cp -v "$DIST/boot.img" /tmp/artifacts/boot-marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM.img
+          supported.vendorpatchlevels=
+          keycheck.timeout=20
+          '; } # end properties
+          
+          # boot shell variables
+          block=boot
+          is_slot_device=auto
+          ramdisk_compression=auto
+          patch_vbmeta_flag=auto
+          no_magisk_check=1
+          
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh
+          
+          # boot install: dump current boot, replace only the kernel, keep the stock ramdisk
+          split_boot
+          
+          if [ -f "$SPLITIMG/ramdisk.cpio" ]; then
+              # marble stock boot carries a ramdisk -> repack preserves it, only kernel is swapped
+              unpack_ramdisk
+              write_boot
+          else
+              flash_boot
           fi
+          
+          ui_print " "
+          ui_print "Kernel flashed. Original ramdisk preserved."
+          AKSH
+          pack_ak3() {
+            IMG="$1"; OUT="$2"
+            rm -rf /tmp/AnyKernel3
+            git clone --depth=1 -q https://github.com/osm0sis/AnyKernel3 /tmp/AnyKernel3
+            rm -f /tmp/AnyKernel3/README.md /tmp/AnyKernel3/anykernel.sh
+            cp -v "$IMG" /tmp/AnyKernel3/Image
+            cp -v /tmp/ak3-anykernel.sh /tmp/AnyKernel3/anykernel.sh
+            ( cd /tmp/AnyKernel3 && zip -r9 "/tmp/artifacts/$OUT" * )
+            echo "=== verify $OUT ==="
+            unzip -l "/tmp/artifacts/$OUT" | tail -n 8
+            unzip -p "/tmp/artifacts/$OUT" anykernel.sh | grep -E "split_boot|write_boot|ak3-core.sh" || { echo "::error::anykernel.sh missing install calls"; exit 1; }
+            unzip -p "/tmp/artifacts/$OUT" Image | strings | grep -m1 "Linux version 5.10.236" || { echo "::error::wrong Image packed"; exit 1; }
+          }
+          pack_ak3 /tmp/ak3-images/Image-ksu "AnyKernel3-marble-5.10.236-android12-DroidSpaces-SukiSU-KPM.zip"
+          pack_ak3 /tmp/ak3-images/Image-bypass "AnyKernel3-marble-5.10.236-android12-DroidSpaces-BYPASS-noKSU.zip"
+          ls -lh /tmp/artifacts/
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: marble-GKI-5.10.236-DroidSpaces-SukiSU-KPM
+          name: marble-5.10.236-android12-DroidSpaces-SukiSU-KPM
           path: /tmp/artifacts/*
           if-no-files-found: error
           retention-days: 14
 
       - name: Summary
         run: |
-          echo "### Build complete - marble GKI 5.10.236 DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
+          echo "### Build complete - marble GKI 5.10.236-android12 (2025-05 pinned) DroidSpaces + SukiSU Ultra KPM" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- Base: common-android12-5.10 (5.10.236)" >> $GITHUB_STEP_SUMMARY
+          echo "- Base: common-android12-5.10-2025-05 pinned (5.10.236-android12-9) + BYPASS no-KSU Image" >> $GITHUB_STEP_SUMMARY
           echo "- DroidSpaces: SYSVIPC + POSIX_MQUEUE kABI patches + gki_defconfig fragment" >> $GITHUB_STEP_SUMMARY
           echo "- Root: SukiSU Ultra latest + CONFIG_KPM=y" >> $GITHUB_STEP_SUMMARY
           echo "- Device: marble (SM7475) HyperOS 3.0 Android 15" >> $GITHUB_STEP_SUMMARY
