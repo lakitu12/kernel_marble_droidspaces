@@ -38,6 +38,16 @@ jobs:
           # PINNED monthly release manifest: marble stock is 5.10.236-android12-9-00003-gfb24cf99ad97 (2025-05, base tag android12-5.10-2025-05_r6)
           # NEVER track branch HEAD common-android12-5.10 - it drifts (2026-08 HEAD built 5.10.264-android12-9 -> vermagic/driver mismatch vs vendor)
           repo init -u https://android.googlesource.com/kernel/manifest -b common-android12-5.10-2025-05 --depth=1
+          # Monthly manifest references branch android12-5.10-2025-05 on kernel/common, but monthly
+          # releases only keep TAGS there (branch deleted). Override via local manifest to the exact
+          # stock base tag r6: peeled commit fb24cf99ad97 == marble stock -gfb24cf99ad97
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/marble-pin.xml <<'LM'
+          <manifest>
+            <remove-project name="kernel/common" />
+            <project path="common" name="kernel/common" revision="refs/tags/android12-5.10-2025-05_r6" />
+          </manifest>
+          LM
           repo sync -c -j$(nproc --all) --no-tags --no-clone-bundle --optimized-fetch --prune
           echo "=== sync done ==="
           du -sh ~/gki
