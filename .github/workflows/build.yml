@@ -72,6 +72,12 @@ jobs:
           # from vendor/waipio_GKI.config) + -droidspaces-lakitu (this file; replaces -g<hash>)
           printf -- '-droidspaces-lakitu' > .scmversion
           cat .scmversion; echo
+          # LTO note: the FULL/THIN choice members are only visible when HAS_LTO_CLANG
+          # is y, which the tree gates on LLVM=1 + LLVM_IAS=1 + llvm NM/AR (arch/Kconfig).
+          # Switch stock FULL -> THIN here; CFI_CLANG stays untouched (still real LTO).
+          sed -i '/CONFIG_LTO/d' arch/arm64/configs/gki_defconfig
+          printf '# CONFIG_LTO_NONE is not set\nCONFIG_LTO_CLANG_THIN=y\n' >> arch/arm64/configs/gki_defconfig
+          tail -n 4 arch/arm64/configs/gki_defconfig
 
       - name: Apply DroidSpaces kABI patches
         run: |
@@ -117,7 +123,7 @@ jobs:
           export PATH="$HOME/clang/bin:$PATH"
           export LD_LIBRARY_PATH="$HOME/clang/lib64:$LD_LIBRARY_PATH"
           export TARGET_PRODUCT=marble
-          MK="make O=$HOME/kl/out ARCH=arm64 TARGET_PRODUCT=marble CC=clang LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-"
+          MK="make O=$HOME/kl/out ARCH=arm64 TARGET_PRODUCT=marble LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu-"
           mkdir -p out
           cp arch/arm64/configs/gki_defconfig out/.config
           $MK olddefconfig
@@ -173,11 +179,9 @@ jobs:
           scripts/kconfig/merge_config.sh -m -O out out/.config /tmp/lakitu.config
           $MK olddefconfig
 
-          # LTO: compile with LTO_CLANG_THIN, keep CFI_CLANG untouched.
-          # Stock lineage kernel is LTO_CLANG_FULL + CFI; THIN still runs the CFI
-          # instrumentation and fits the 7GB runner (FULL needs >16GB).
-          scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN
-          $MK olddefconfig
+          # (LTO FULL -> THIN was already applied to gki_defconfig in the clone step)
+          echo "=== LTO state in out/.config ==="
+          grep -E 'CONFIG_LTO' out/.config || true
 
           echo "=== early config gates ==="
           grep -q '^CONFIG_LTO_CLANG_THIN=y' out/.config || { echo "::error::LTO thin missing"; exit 1; }
@@ -207,7 +211,7 @@ jobs:
           export PATH="$HOME/clang/bin:$PATH"
           export LD_LIBRARY_PATH="$HOME/clang/lib64:$LD_LIBRARY_PATH"
           make O=$HOME/kl/out ARCH=arm64 TARGET_PRODUCT=marble \
-            CC=clang LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld CROSS_COMPILE=aarch64-linux-gnu- CLANG_TRIPLE=aarch64-linux-gnu- \
             -j2 Image 2>&1 | tee build.log
           ls -lh out/arch/arm64/boot/Image
 
