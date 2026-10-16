@@ -12,9 +12,13 @@ env:
   # --- all upstreams pinned (no floating refs) ---
   # LineageOS/android_kernel_xiaomi_sm8450 @ lineage-24.0 (Linux 5.10.269)
   LINEAGE_PIN: eff4b40407a1b6f1b1ab84554cbb540bcb495175
-  # AOSP official clang prebuilt (lineage builds use r596125 internally; r547379 is the
-  # newest single-version archive retrievable from android.googlesource.com)
-  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r547379.tar.gz
+  # AOSP official clang prebuilt — MUST equal the toolchain that built the ROM's stock
+  # kernel (5.10.269-gki-geff4b40407a1 = clang 22.0.2 / r596125). CFI_CLANG/BTI codegen
+  # is only compatible within one clang release: an r547379(20.0.0)-built kernel panics
+  # in __cfi_check on the first call into a clang-22 vendor module — "Bad mode ...
+  # code 0x36000002 -- BTI" + "Kernel panic - not syncing: bad mode" (qcom_tsens, ~0.3s),
+  # captured in the device minidump partition 2026-10-16. Source: clang main-kernel branch.
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main-kernel/clang-r596125.tar.gz
   # SukiSU Ultra stable v4.2.1-40994 (main line, pinned commit).
   # NOTE: SUSFS is a `builtin`-branch-only feature and is intentionally not part of
   # this build; the builtin branch cannot be used right now (its 2026-10-15 head
@@ -49,13 +53,14 @@ jobs:
             curl zip unzip tar xz-utils gcc g++ gawk openssl \
             gcc-aarch64-linux-gnu device-tree-compiler
 
-      - name: Fetch clang prebuilt (AOSP r547379)
+      - name: Fetch clang prebuilt (AOSP r596125 = ROM stock kernel toolchain)
         run: |
           mkdir -p "$HOME/clang"
           curl -fsSL --retry 3 -o /tmp/clang.tar.gz "$CLANG_URL"
           tar -xzf /tmp/clang.tar.gz -C "$HOME/clang"
           rm -f /tmp/clang.tar.gz
           "$HOME/clang/bin/clang" --version | sed -n '1,2p'
+          "$HOME/clang/bin/clang" --version | grep -qF 'clang version 22.0.2' || { echo "::error::clang r596125 (22.0.2) expected"; exit 1; }
 
       - name: Clone LineageOS kernel tree (pinned)
         run: |
